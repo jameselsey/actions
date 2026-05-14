@@ -1,6 +1,6 @@
 # android-api-level-check
 
-Checks an Android app's `targetSdkVersion` against Google Play compliance requirements and outputs notification-ready data. Designed to be paired with `discord-notify` or any other notification action.
+Checks an Android app's `targetSdk` and `compileSdk` against the latest stable Android SDK level, fetched live from the Android SDK repository. No config file or manual version tracking required — the latest SDK is always current automatically.
 
 ## Usage
 
@@ -8,7 +8,6 @@ Checks an Android app's `targetSdkVersion` against Google Play compliance requir
 - name: Check API level compliance
   id: compliance
   uses: jameselsey/actions/android-api-level-check@main
-  # uses defaults: app/build.gradle.kts + .github/workflows/config/monitoring-config.json
 
 - name: Notify if non-compliant
   if: steps.compliance.outputs.status != 'compliant'
@@ -25,7 +24,7 @@ Checks an Android app's `targetSdkVersion` against Google Play compliance requir
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `build-gradle-path` | | `app/build.gradle.kts` | Path to the app-level build file |
-| `monitoring-config-path` | | `.github/workflows/config/monitoring-config.json` | Path to the monitoring config |
+| `warning-levels-behind` | | `1` | Levels behind latest before a warning fires. Default 1 means warn if not on the latest stable SDK. |
 
 ## Outputs
 
@@ -37,24 +36,18 @@ Checks an Android app's `targetSdkVersion` against Google Play compliance requir
 | `fields` | JSON array of Discord embed fields |
 | `target_sdk` | Current `targetSdkVersion` |
 | `compile_sdk` | Current `compileSdkVersion` |
-| `required_sdk` | Required `targetSdkVersion` from config |
-| `days_remaining` | Days until the compliance deadline |
+| `latest_sdk` | Latest stable SDK level fetched from the Android SDK repository |
 
-## Monitoring config format
+## Status logic
 
-The action reads from a JSON config file with this structure:
+| Condition | Status |
+|-----------|--------|
+| `targetSdk ≠ compileSdk` | `critical` — misconfiguration |
+| `compileSdk` is more than `warning-levels-behind` behind latest | `critical` |
+| `compileSdk` is exactly `warning-levels-behind` behind latest | `warning` |
+| `compileSdk == latest` | `compliant` |
 
-```json
-{
-  "api_requirements": {
-    "next_target_sdk": 35,
-    "next_deadline": "2025-08-31",
-    "documentation_url": "https://developer.android.com/google/play/requirements/target-sdk"
-  },
-  "thresholds": {
-    "api_level_warning_days": 90
-  }
-}
-```
+## Notes
 
-This config lives in the calling repository, so each app controls its own deadline and warning threshold independently.
+- The latest stable SDK is fetched from `https://dl.google.com/android/repository/repository2-3.xml` on every run — no manual config updates needed when Google releases a new Android version.
+- If the fetch fails (network issue), the check is skipped gracefully and reports compliant.

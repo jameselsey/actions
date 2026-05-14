@@ -60,7 +60,6 @@ runs:
       uses: jameselsey/actions/android-api-level-check@main
       with:
         build-gradle-path: ${{ inputs.app-build-gradle-path }}
-        monitoring-config-path: ${{ inputs.monitoring-config-path }}
 
     - name: Check build tools
       id: tools
@@ -176,9 +175,8 @@ runs:
         API_VALUE=$(jq -n \
           --arg msg "${{ steps.api.outputs.message }}" \
           --arg sdk "${{ steps.api.outputs.target_sdk }}" \
-          --arg req "${{ steps.api.outputs.required_sdk }}" \
-          --arg days "${{ steps.api.outputs.days_remaining }}" \
-          '$msg + "\n• Current targetSdk: " + $sdk + "\n• Required: " + $req + "\n• Days until deadline: " + $days')
+          --arg latest "${{ steps.api.outputs.latest_sdk }}" \
+          '$msg + "\n• targetSdk: " + $sdk + "\n• Latest stable: " + $latest')
         FIELDS=$(echo "$FIELDS" | jq --argjson v "$API_VALUE" '. + [{"name":"📱 API Compliance","value":$v,"inline":true}]')
 
         # Build Health
