@@ -1,0 +1,193 @@
+name: 'Android Dependency Check'
+description: 'Scans build.gradle.kts files for outdated Maven dependencies and outputs notification-ready data'
+
+inputs:
+  gradle-files:
+    description: 'Space-separated list of build.gradle.kts files to scan'
+    required: false
+    default: 'build.gradle.kts app/build.gradle.kts'
+
+outputs:
+  has_updates:
+    description: 'true if any dependency updates are available'
+    value: ${{ steps.check.outputs.has_updates }}
+  color:
+    description: 'Discord embed color for the status'
+    value: ${{ steps.check.outputs.color }}
+  description:
+    description: 'Short summary string for the Discord notification description'
+    value: ${{ steps.check.outputs.description }}
+  fields:
+    description: 'JSON array of Discord embed fields'
+    value: ${{ steps.check.outputs.fields }}
+  total:
+    description: 'Total number of dependencies scanned'
+    value: ${{ steps.check.outputs.total }}
+  outdated:
+    description: 'Number of outdated dependencies'
+    value: ${{ steps.check.outputs.outdated }}
+  major:
+    description: 'Number of major version updates available'
+    value: ${{ steps.check.outputs.major }}
+  minor:
+    description: 'Number of minor version updates available'
+    value: ${{ steps.check.outputs.minor }}
+  patch:
+    description: 'Number of patch version updates available'
+    value: ${{ steps.check.outputs.patch }}
+  health_score:
+    description: 'Health score 0-100 (penalised by severity: major=-10, minor=-5, patch=-2)'
+    value: ${{ steps.check.outputs.health_score }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check dependencies
+      id: check
+      shell: bash
+      run: |
+        GRADLE_FILES="${{ inputs.gradle-files }}"
+
+        get_latest_version() {
+          local group="$1" artifact="$2" current="$3"
+          local url="https://search.maven.org/solrsearch/select?q=g:${group}+AND+a:${artifact}&rows=1&wt=json"
+          local latest=$(curl -s "$url" | jq -r '.response.docs[0].latestVersion // empty')
+          echo "${latest:-$current}"
+        }
+
+        classify_severity() {
+          local current="$1" latest="$2"
+          local cm=$(echo "$current" | cut -d. -f1 | grep -oE '[0-9]+')
+          local lm=$(echo "$latest"  | cut -d. -f1 | grep -oE '[0-9]+')
+          local cn=$(echo "$current" | cut -d. -f2 | grep -oE '[0-9]+' || echo 0)
+          local ln=$(echo "$latest"  | cut -d. -f2 | grep -oE '[0-9]+' || echo 0)
+          local cp=$(echo "$current" | cut -d. -f3 | grep -oE '[0-9]+' || echo 0)
+          local lp=$(echo "$latest"  | cut -d. -f3 | grep -oE '[0-9]+' || echo 0)
+          if   [ "$lm" -gt "$cm" ]; then echo "major"
+          elif [ "$ln" -gt "$cn" ]; then echo "minor"
+          elif [ "$lp" -gt "$cp" ]; then echo "patch"
+          else echo "none"; fi
+        }
+
+        declare -A dependencies
+
+        for gradle_file in $GRADLE_FILES; do
+          if [ -f "$gradle_file" ]; then
+            echo "📂 Scanning $gradle_file..."
+            while IFS= read -r line; do
+              if echo "$line" | grep -qE '^\s*(implementation|api|compileOnly|runtimeOnly)\s*\('; then
+                dep=$(echo "$line" | grep -oE '"[^":]+":[^:]+:[^"]+"' | tr -d '"')
+                if [ -n "$dep" ]; then
+                  group=$(echo "$dep" | cut -d: -f1)
+                  artifact=$(echo "$dep" | cut -d: -f2)
+                  version=$(echo "$dep" | cut -d: -f3)
+                  dependencies["${group}:${artifact}"]="$version"
+                fi
+              fi
+            done < "$gradle_file"
+          fi
+        done
+
+        TOTAL=${#dependencies[@]}
+        updates_json="[]"
+        has_updates=false
+        outdated_count=0
+        major_count=0; minor_count=0; patch_count=0
+
+        for dep_key in "${!dependencies[@]}"; do
+          group=$(echo "$dep_key" | cut -d: -f1)
+          artifact=$(echo "$dep_key" | cut -d: -f2)
+          current="${dependencies[$dep_key]}"
+          latest=$(get_latest_version "$group" "$artifact" "$current")
+
+          if [ "$latest" = "$current" ]; then
+            echo "  ✓ $dep_key ($current)"
+            continue
+          fi
+
+          severity=$(classify_severity "$current" "$latest")
+          if [ "$severity" != "none" ]; then
+            echo "  → $dep_key: $current → $latest ($severity)"
+            has_updates=true
+            outdated_count=$((outdated_count + 1))
+            case "$severity" in
+              major) major_count=$((major_count + 1)) ;;
+              minor) minor_count=$((minor_count + 1)) ;;
+              patch) patch_count=$((patch_count + 1)) ;;
+            esac
+            entry=$(jq -n \
+              --arg g "$group" --arg a "$artifact" \
+              --arg c "$current" --arg l "$latest" --arg s "$severity" \
+              '{group:$g,artifact:$a,current:$c,latest:$l,severity:$s}')
+            updates_json=$(echo "$updates_json" | jq --argjson e "$entry" '. += [$e]')
+          fi
+        done
+
+        # Health score
+        penalty=$((major_count * 10 + minor_count * 5 + patch_count * 2))
+        health_score=$((100 - penalty))
+        [ $health_score -lt 0 ] && health_score=0
+
+        # Description
+        total_updates=$((major_count + minor_count + patch_count))
+        DESCRIPTION="Found **$total_updates** dependency update(s) available"
+        [ $major_count -gt 0 ] && DESCRIPTION="$DESCRIPTION\n\n⚠️ **$major_count major** update(s) — may include breaking changes"
+
+        # Build Discord fields
+        FIELDS=$(jq -n '[]')
+
+        if [ $major_count -gt 0 ]; then
+          major_text=""
+          while IFS= read -r u; do
+            g=$(echo "$u" | jq -r '.group'); a=$(echo "$u" | jq -r '.artifact')
+            c=$(echo "$u" | jq -r '.current'); l=$(echo "$u" | jq -r '.latest')
+            major_text="${major_text}• \`${g}:${a}\`: ${c} → **${l}**\n"
+          done < <(echo "$updates_json" | jq -c '.[] | select(.severity=="major")')
+          FIELDS=$(echo "$FIELDS" | jq --arg n "🔴 Major Updates ($major_count)" --arg v "$major_text" '. + [{"name":$n,"value":$v,"inline":false}]')
+        fi
+
+        if [ $minor_count -gt 0 ]; then
+          minor_text=""
+          while IFS= read -r u; do
+            g=$(echo "$u" | jq -r '.group'); a=$(echo "$u" | jq -r '.artifact')
+            c=$(echo "$u" | jq -r '.current'); l=$(echo "$u" | jq -r '.latest')
+            minor_text="${minor_text}• \`${g}:${a}\`: ${c} → ${l}\n"
+          done < <(echo "$updates_json" | jq -c '.[] | select(.severity=="minor")')
+          FIELDS=$(echo "$FIELDS" | jq --arg n "🟡 Minor Updates ($minor_count)" --arg v "$minor_text" '. + [{"name":$n,"value":$v,"inline":false}]')
+        fi
+
+        if [ $patch_count -gt 0 ]; then
+          patch_text=""
+          while IFS= read -r u; do
+            g=$(echo "$u" | jq -r '.group'); a=$(echo "$u" | jq -r '.artifact')
+            c=$(echo "$u" | jq -r '.current'); l=$(echo "$u" | jq -r '.latest')
+            patch_text="${patch_text}• \`${g}:${a}\`: ${c} → ${l}\n"
+          done < <(echo "$updates_json" | jq -c '.[] | select(.severity=="patch")')
+          FIELDS=$(echo "$FIELDS" | jq --arg n "🟢 Patch Updates ($patch_count)" --arg v "$patch_text" '. + [{"name":$n,"value":$v,"inline":false}]')
+        fi
+
+        action_text="1. Review the updates above\n2. Update \`build.gradle.kts\` or \`app/build.gradle.kts\`\n3. Test thoroughly, especially for major updates\n4. Run \`./gradlew build\` to verify"
+        FIELDS=$(echo "$FIELDS" | jq --arg n "📋 Action Required" --arg v "$action_text" '. + [{"name":$n,"value":$v,"inline":false}]')
+
+        # Color
+        if   [ $major_count -gt 0 ]; then COLOR="16744272"
+        elif [ $minor_count -gt 0 ]; then COLOR="16776960"
+        else COLOR="3447003"; fi
+
+        # --- Set outputs ---
+        echo "has_updates=$has_updates" >> $GITHUB_OUTPUT
+        echo "color=$COLOR" >> $GITHUB_OUTPUT
+        echo "total=$TOTAL" >> $GITHUB_OUTPUT
+        echo "outdated=$outdated_count" >> $GITHUB_OUTPUT
+        echo "major=$major_count" >> $GITHUB_OUTPUT
+        echo "minor=$minor_count" >> $GITHUB_OUTPUT
+        echo "patch=$patch_count" >> $GITHUB_OUTPUT
+        echo "health_score=$health_score" >> $GITHUB_OUTPUT
+        echo "description=$DESCRIPTION" >> $GITHUB_OUTPUT
+        {
+          echo 'fields<<EOF'
+          echo "$FIELDS"
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT
+
+        echo "✅ Dependency check complete: $outdated_count/$TOTAL outdated (has_updates=$has_updates)"

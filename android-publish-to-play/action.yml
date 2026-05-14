@@ -1,0 +1,73 @@
+name: 'Android Publish to Play'
+description: 'Publish a signed AAB and store listing to Google Play using the Gradle Play Publisher plugin'
+
+inputs:
+  service-account-json:
+    description: 'Google Play service account JSON (plain text, store as a repository secret)'
+    required: true
+  track:
+    description: 'Google Play track to publish to: internal, alpha, beta, or production. Must match the track configured in the play{} block in build.gradle.kts.'
+    required: false
+    default: 'alpha'
+  release-notes:
+    description: 'Release notes text (plain text). Written to app/src/main/play/release-notes/en-US/default.txt before publishing.'
+    required: false
+    default: ''
+  java-version:
+    description: 'JDK version to use'
+    required: false
+    default: '17'
+
+outputs:
+  track:
+    description: 'The Google Play track that was published to'
+    value: ${{ steps.publish.outputs.track }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+
+    - name: Cache Gradle packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Make gradlew executable
+      shell: bash
+      run: chmod +x ./gradlew
+
+    - name: Write release notes
+      shell: bash
+      run: |
+        NOTES_FILE="app/src/main/play/release-notes/en-US/default.txt"
+        mkdir -p "$(dirname "$NOTES_FILE")"
+        if [ -n "${{ inputs.release-notes }}" ]; then
+          printf '%s' "${{ inputs.release-notes }}" > "$NOTES_FILE"
+          echo "✅ Release notes written to $NOTES_FILE"
+        else
+          echo "ℹ️ No release notes provided — using existing content in $NOTES_FILE"
+        fi
+
+    - name: Publish to Google Play
+      id: publish
+      shell: bash
+      env:
+        PLAY_SERVICE_ACCOUNT_JSON: ${{ inputs.service-account-json }}
+      run: |
+        echo "🚀 Publishing to Google Play (track: ${{ inputs.track }})..."
+        # GPP task name is publish<Variant>Bundle — publishReleaseBundle for the release variant.
+        # The track is configured in the play{} block in app/build.gradle.kts.
+        # GPP also syncs the store listing (descriptions, screenshots) from app/src/main/play/.
+        ./gradlew publishReleaseBundle --stacktrace
+        echo "track=${{ inputs.track }}" >> $GITHUB_OUTPUT
+        echo "✅ Published successfully"

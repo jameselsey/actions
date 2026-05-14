@@ -1,0 +1,131 @@
+name: 'Android API Level Check'
+description: 'Checks Android targetSdk compliance against Google Play requirements and outputs notification-ready data'
+inputs:
+  build-gradle-path:
+    description: 'Path to the app build.gradle.kts file'
+    required: false
+    default: 'app/build.gradle.kts'
+  monitoring-config-path:
+    description: 'Path to the monitoring config JSON file'
+    required: false
+    default: '.github/workflows/config/monitoring-config.json'
+
+outputs:
+  status:
+    description: 'Compliance status: compliant, warning, or critical'
+    value: ${{ steps.check.outputs.status }}
+  message:
+    description: 'Human-readable status message'
+    value: ${{ steps.check.outputs.message }}
+  color:
+    description: 'Discord embed color for the status'
+    value: ${{ steps.check.outputs.color }}
+  fields:
+    description: 'JSON array of Discord embed fields describing the compliance state'
+    value: ${{ steps.check.outputs.fields }}
+  target_sdk:
+    description: 'Current targetSdkVersion'
+    value: ${{ steps.check.outputs.target_sdk }}
+  compile_sdk:
+    description: 'Current compileSdkVersion'
+    value: ${{ steps.check.outputs.compile_sdk }}
+  required_sdk:
+    description: 'Required targetSdkVersion from config'
+    value: ${{ steps.check.outputs.required_sdk }}
+  days_remaining:
+    description: 'Days until the compliance deadline'
+    value: ${{ steps.check.outputs.days_remaining }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check API level compliance
+      id: check
+      shell: bash
+      run: |
+        BUILD_FILE="${{ inputs.build-gradle-path }}"
+        CONFIG_FILE="${{ inputs.monitoring-config-path }}"
+
+        # --- Load config ---
+        if [ ! -f "$CONFIG_FILE" ]; then
+          echo "❌ Config file not found: $CONFIG_FILE"
+          exit 1
+        fi
+
+        REQUIRED_TARGET_SDK=$(jq -r '.api_requirements.next_target_sdk' "$CONFIG_FILE")
+        DEADLINE=$(jq -r '.api_requirements.next_deadline' "$CONFIG_FILE")
+        WARNING_DAYS=$(jq -r '.thresholds.api_level_warning_days' "$CONFIG_FILE")
+        DOC_URL=$(jq -r '.api_requirements.documentation_url' "$CONFIG_FILE")
+
+        # --- Extract SDK versions ---
+        if [ ! -f "$BUILD_FILE" ]; then
+          echo "❌ Build file not found: $BUILD_FILE"
+          exit 1
+        fi
+
+        COMPILE_SDK=$(grep -E '^\s*compileSdk\s*=' "$BUILD_FILE" | grep -oE '[0-9]+' | head -1)
+        TARGET_SDK=$(grep -E '^\s*targetSdk\s*=' "$BUILD_FILE" | grep -oE '[0-9]+' | head -1)
+
+        if [ -z "$COMPILE_SDK" ] || [ -z "$TARGET_SDK" ]; then
+          echo "❌ Failed to extract SDK versions from $BUILD_FILE"
+          exit 1
+        fi
+
+        echo "📱 compileSdk=$COMPILE_SDK  targetSdk=$TARGET_SDK  required=$REQUIRED_TARGET_SDK  deadline=$DEADLINE"
+
+        # --- Calculate days remaining ---
+        CURRENT_DATE=$(date +%s)
+        DEADLINE_DATE=$(date -d "$DEADLINE" +%s 2>/dev/null || date -j -f "%Y-%m-%d" "$DEADLINE" +%s)
+        DAYS_REMAINING=$(( (DEADLINE_DATE - CURRENT_DATE) / 86400 ))
+
+        # --- Determine status ---
+        if [ "$TARGET_SDK" -lt "$REQUIRED_TARGET_SDK" ]; then
+          STATUS="critical"
+          MESSAGE="❌ CRITICAL: targetSdkVersion update required"
+          COLOR="16744272"
+        elif [ "$DAYS_REMAINING" -lt "$WARNING_DAYS" ]; then
+          STATUS="warning"
+          MESSAGE="⚠️ WARNING: Upcoming API level requirement"
+          COLOR="16776960"
+        else
+          STATUS="compliant"
+          MESSAGE="✅ API level compliant"
+          COLOR="3066993"
+        fi
+
+        # --- Build Discord fields ---
+        DEADLINE_FORMATTED=$(date -d "$DEADLINE" "+%B %d, %Y" 2>/dev/null || date -j -f "%Y-%m-%d" "$DEADLINE" "+%B %d, %Y")
+
+        if [ "$STATUS" = "critical" ]; then
+          CURRENT_STATUS_VALUE="• **targetSdkVersion**: $TARGET_SDK ❌\n• **compileSdkVersion**: $COMPILE_SDK\n• **Required**: $REQUIRED_TARGET_SDK\n• **Deadline**: $DEADLINE_FORMATTED\n• **Days remaining**: $DAYS_REMAINING"
+          ACTION_VALUE="Update \`$BUILD_FILE\`:\n\`\`\`kotlin\ncompileSdk = $REQUIRED_TARGET_SDK\ntargetSdk = $REQUIRED_TARGET_SDK\n\`\`\`\n\nThen test your app thoroughly for compatibility issues."
+        else
+          CURRENT_STATUS_VALUE="• **targetSdkVersion**: $TARGET_SDK\n• **compileSdkVersion**: $COMPILE_SDK\n• **Required by**: $DEADLINE_FORMATTED\n• **Days remaining**: $DAYS_REMAINING"
+          ACTION_VALUE="Plan to update \`$BUILD_FILE\` before $DEADLINE_FORMATTED:\n\`\`\`kotlin\ncompileSdk = $REQUIRED_TARGET_SDK\ntargetSdk = $REQUIRED_TARGET_SDK\n\`\`\`"
+        fi
+
+        FIELDS=$(jq -n \
+          --arg cs "$CURRENT_STATUS_VALUE" \
+          --arg av "$ACTION_VALUE" \
+          --arg du "$DOC_URL" \
+          '[
+            {"name": "📱 Current Status", "value": $cs, "inline": false},
+            {"name": "🔧 Action Required", "value": $av, "inline": false},
+            {"name": "📚 Documentation", "value": ("[Target API Level Requirements](" + $du + ")"), "inline": false}
+          ]')
+
+        # --- Set outputs ---
+        echo "status=$STATUS" >> $GITHUB_OUTPUT
+        echo "message=$MESSAGE" >> $GITHUB_OUTPUT
+        echo "color=$COLOR" >> $GITHUB_OUTPUT
+        echo "target_sdk=$TARGET_SDK" >> $GITHUB_OUTPUT
+        echo "compile_sdk=$COMPILE_SDK" >> $GITHUB_OUTPUT
+        echo "required_sdk=$REQUIRED_TARGET_SDK" >> $GITHUB_OUTPUT
+        echo "days_remaining=$DAYS_REMAINING" >> $GITHUB_OUTPUT
+        {
+          echo 'fields<<EOF'
+          echo "$FIELDS"
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT
+
+        echo "✅ API level check complete: $STATUS ($MESSAGE)"

@@ -1,0 +1,207 @@
+name: 'Android Weekly Digest'
+description: 'Runs all Android health checks (dependencies, API level, build tools, build history) and outputs a combined Discord digest'
+
+inputs:
+  root-build-gradle-path:
+    description: 'Path to the root build.gradle.kts file'
+    required: false
+    default: 'build.gradle.kts'
+  app-build-gradle-path:
+    description: 'Path to the app-level build.gradle.kts file'
+    required: false
+    default: 'app/build.gradle.kts'
+  gradle-wrapper-path:
+    description: 'Path to gradle-wrapper.properties'
+    required: false
+    default: 'gradle/wrapper/gradle-wrapper.properties'
+  monitoring-config-path:
+    description: 'Path to the monitoring config JSON file'
+    required: false
+    default: '.github/workflows/config/monitoring-config.json'
+  build-history-days:
+    description: 'Number of days of build history to include'
+    required: false
+    default: '7'
+  repository:
+    description: 'Repository in owner/name format (used to fetch build history)'
+    required: true
+  github-token:
+    description: 'GitHub token for fetching workflow run history'
+    required: true
+
+outputs:
+  title:
+    description: 'Digest notification title'
+    value: ${{ steps.digest.outputs.title }}
+  description:
+    description: 'Digest notification description (overall score + period)'
+    value: ${{ steps.digest.outputs.description }}
+  color:
+    description: 'Discord embed color based on overall health score'
+    value: ${{ steps.digest.outputs.color }}
+  fields:
+    description: 'JSON array of Discord embed fields for the full digest'
+    value: ${{ steps.digest.outputs.fields }}
+  overall_score:
+    description: 'Overall health score 0-100'
+    value: ${{ steps.digest.outputs.overall_score }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check dependencies
+      id: deps
+      uses: jameselsey/actions/android-dependency-check@main
+      with:
+        gradle-files: '${{ inputs.root-build-gradle-path }} ${{ inputs.app-build-gradle-path }}'
+
+    - name: Check API level compliance
+      id: api
+      uses: jameselsey/actions/android-api-level-check@main
+      with:
+        build-gradle-path: ${{ inputs.app-build-gradle-path }}
+        monitoring-config-path: ${{ inputs.monitoring-config-path }}
+
+    - name: Check build tools
+      id: tools
+      uses: jameselsey/actions/android-build-tools-check@main
+      with:
+        root-build-gradle-path: ${{ inputs.root-build-gradle-path }}
+        gradle-wrapper-path: ${{ inputs.gradle-wrapper-path }}
+
+    - name: Fetch build history
+      id: history
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        BUILD_HISTORY_DAYS="${{ inputs.build-history-days }}"
+        REPOSITORY="${{ inputs.repository }}"
+
+        SINCE_DATE=$(date -d "$BUILD_HISTORY_DAYS days ago" +%Y-%m-%d 2>/dev/null || date -v-${BUILD_HISTORY_DAYS}d +%Y-%m-%d)
+        echo "📊 Fetching workflow runs since $SINCE_DATE for $REPOSITORY..."
+
+        if ! WORKFLOW_RUNS=$(gh api \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${REPOSITORY}/actions/runs?per_page=100&created=>=$SINCE_DATE" \
+          --jq '.workflow_runs[] | select(.name != "Weekly Digest") | {conclusion: .conclusion}' 2>&1); then
+          echo "⚠️ Could not fetch workflow runs, continuing with empty history"
+          WORKFLOW_RUNS=""
+        fi
+
+        total=0; successful=0; failed=0
+        if [ -n "$WORKFLOW_RUNS" ]; then
+          while IFS= read -r run; do
+            conclusion=$(echo "$run" | jq -r '.conclusion')
+            [ "$conclusion" = "null" ] && continue
+            total=$((total + 1))
+            [ "$conclusion" = "success" ] && successful=$((successful + 1))
+            [ "$conclusion" = "failure" ] && failed=$((failed + 1))
+          done < <(echo "$WORKFLOW_RUNS" | jq -c '.')
+        fi
+
+        if [ $total -eq 0 ]; then
+          health_score=100
+          status="ℹ️ No builds in last $BUILD_HISTORY_DAYS days"
+        else
+          health_score=$((successful * 100 / total))
+          if [ $failed -eq 0 ]; then
+            status="✅ All builds successful"
+          else
+            status="⚠️ $failed failure(s) in last $BUILD_HISTORY_DAYS days"
+          fi
+        fi
+
+        echo "total=$total" >> $GITHUB_OUTPUT
+        echo "successful=$successful" >> $GITHUB_OUTPUT
+        echo "failed=$failed" >> $GITHUB_OUTPUT
+        echo "health_score=$health_score" >> $GITHUB_OUTPUT
+        echo "status=$status" >> $GITHUB_OUTPUT
+        echo "✅ Build history: $successful/$total successful"
+
+    - name: Build digest
+      id: digest
+      shell: bash
+      run: |
+        # Individual scores
+        DEP_SCORE="${{ steps.deps.outputs.health_score }}"
+        API_SCORE="${{ steps.api.outputs.status == 'compliant' && '100' || steps.api.outputs.status == 'warning' && '50' || '0' }}"
+        TOOLS_SCORE="${{ steps.tools.outputs.health_score }}"
+        BUILD_SCORE="${{ steps.history.outputs.health_score }}"
+
+        # Load weights from config (default equal weights if config missing keys)
+        CONFIG_FILE="${{ inputs.monitoring-config-path }}"
+        DEP_W=$(jq -r '.weekly_digest.health_score_weights.dependencies // 25' "$CONFIG_FILE")
+        API_W=$(jq -r '.weekly_digest.health_score_weights.api_compliance // 25' "$CONFIG_FILE")
+        BUILD_W=$(jq -r '.weekly_digest.health_score_weights.build_health // 25' "$CONFIG_FILE")
+        TOOLS_W=$(jq -r '.weekly_digest.health_score_weights.build_tools // 25' "$CONFIG_FILE")
+
+        OVERALL=$(echo "scale=0; ($DEP_SCORE * $DEP_W + $API_SCORE * $API_W + $BUILD_SCORE * $BUILD_W + $TOOLS_SCORE * $TOOLS_W) / 100" | bc)
+
+        if   [ "$OVERALL" -ge 90 ]; then STATUS="🟢 Excellent"; COLOR="3066993"
+        elif [ "$OVERALL" -ge 70 ]; then STATUS="🟡 Good";      COLOR="16776960"
+        elif [ "$OVERALL" -ge 50 ]; then STATUS="🟠 Fair";      COLOR="16744272"
+        else                              STATUS="🔴 Needs Attention"; COLOR="15158332"
+        fi
+
+        END_DATE=$(date +"%b %d, %Y")
+        START_DATE=$(date -d "7 days ago" +"%b %d" 2>/dev/null || date -v-7d +"%b %d")
+        DESCRIPTION="**Report Period:** $START_DATE – $END_DATE\n**Overall Health Score:** $OVERALL/100\n**Status:** $STATUS"
+
+        # Build fields
+        FIELDS=$(jq -n '[]')
+
+        # Dependencies
+        DEP_STATUS="${{ steps.deps.outputs.has_updates == 'true' && format('⚠️ {0} update(s) available', steps.deps.outputs.outdated) || '✅ All dependencies up to date' }}"
+        DEP_VALUE="$DEP_STATUS\n• Total: ${{ steps.deps.outputs.total }}"
+        if [ "${{ steps.deps.outputs.outdated }}" -gt 0 ]; then
+          DEP_VALUE="$DEP_VALUE\n• Updates: ${{ steps.deps.outputs.major }} major, ${{ steps.deps.outputs.minor }} minor, ${{ steps.deps.outputs.patch }} patch"
+        fi
+        FIELDS=$(echo "$FIELDS" | jq --arg n "📦 Dependencies" --arg v "$DEP_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+
+        # API Compliance
+        API_VALUE="${{ steps.api.outputs.message }}\n• Current targetSdk: ${{ steps.api.outputs.target_sdk }}\n• Required: ${{ steps.api.outputs.required_sdk }}\n• Days until deadline: ${{ steps.api.outputs.days_remaining }}"
+        FIELDS=$(echo "$FIELDS" | jq --arg n "📱 API Compliance" --arg v "$API_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+
+        # Build Health
+        BUILD_VALUE="${{ steps.history.outputs.status }}\n• Last ${{ inputs.build-history-days }} days: ${{ steps.history.outputs.successful }}/${{ steps.history.outputs.total }} successful"
+        FIELDS=$(echo "$FIELDS" | jq --arg n "🏗️ Build Health" --arg v "$BUILD_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+
+        # Build Tools
+        TOOLS_STATUS="${{ steps.tools.outputs.outdated_count > 0 && format('⚠️ {0} tool(s) outdated', steps.tools.outputs.outdated_count) || '✅ All build tools current' }}"
+        TOOLS_VALUE="$TOOLS_STATUS\n• Gradle: ${{ steps.tools.outputs.gradle_current }}"
+        [ "${{ steps.tools.outputs.gradle_status }}" = "outdated" ] && TOOLS_VALUE="$TOOLS_VALUE → ${{ steps.tools.outputs.gradle_latest }}"
+        TOOLS_VALUE="$TOOLS_VALUE\n• AGP: ${{ steps.tools.outputs.agp_current }}"
+        [ "${{ steps.tools.outputs.agp_status }}" = "outdated" ] && TOOLS_VALUE="$TOOLS_VALUE → ${{ steps.tools.outputs.agp_latest }}"
+        TOOLS_VALUE="$TOOLS_VALUE\n• Kotlin: ${{ steps.tools.outputs.kotlin_current }}"
+        [ "${{ steps.tools.outputs.kotlin_status }}" = "outdated" ] && TOOLS_VALUE="$TOOLS_VALUE → ${{ steps.tools.outputs.kotlin_latest }}"
+        FIELDS=$(echo "$FIELDS" | jq --arg n "🔧 Build Tools" --arg v "$TOOLS_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+
+        # Action items
+        ACTION_ITEMS=""
+        N=1
+        [ "${{ steps.api.outputs.status }}" = "critical" ] && { ACTION_ITEMS="${ACTION_ITEMS}${N}. **URGENT:** Update targetSdk to ${{ steps.api.outputs.required_sdk }}\n"; N=$((N+1)); }
+        [ "${{ steps.deps.outputs.major }}" -gt 0 ] 2>/dev/null && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Review ${{ steps.deps.outputs.major }} major dependency update(s)\n"; N=$((N+1)); }
+        [ "${{ steps.history.outputs.failed }}" -gt 0 ] 2>/dev/null && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Investigate ${{ steps.history.outputs.failed }} recent build failure(s)\n"; N=$((N+1)); }
+        [ "${{ steps.tools.outputs.outdated_count }}" -gt 0 ] 2>/dev/null && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Update ${{ steps.tools.outputs.outdated_count }} build tool(s)\n"; N=$((N+1)); }
+        MINOR_PATCH=$(( ${{ steps.deps.outputs.minor }} + ${{ steps.deps.outputs.patch }} ))
+        [ $MINOR_PATCH -gt 0 ] && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Consider updating $MINOR_PATCH minor/patch dependencies\n"; }
+
+        if [ -n "$ACTION_ITEMS" ]; then
+          FIELDS=$(echo "$FIELDS" | jq --arg n "📋 Action Items" --arg v "$ACTION_ITEMS" '. + [{"name":$n,"value":$v,"inline":false}]')
+        else
+          FIELDS=$(echo "$FIELDS" | jq --arg n "✅ Status" --arg v "No action items — all systems healthy!" '. + [{"name":$n,"value":$v,"inline":false}]')
+        fi
+
+        echo "overall_score=$OVERALL" >> $GITHUB_OUTPUT
+        echo "color=$COLOR" >> $GITHUB_OUTPUT
+        echo "title=📊 Weekly App Health Digest" >> $GITHUB_OUTPUT
+        echo "description=$DESCRIPTION" >> $GITHUB_OUTPUT
+        {
+          echo 'fields<<EOF'
+          echo "$FIELDS"
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT
+
+        echo "✅ Digest built: $OVERALL/100 ($STATUS)"

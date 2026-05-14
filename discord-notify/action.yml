@@ -1,0 +1,133 @@
+name: 'Discord Notify'
+description: 'Send formatted notifications to Discord with retry logic and error handling'
+inputs:
+  webhook-url:
+    description: 'Discord webhook URL'
+    required: true
+  title:
+    description: 'Notification title'
+    required: true
+  description:
+    description: 'Main message content'
+    required: false
+    default: ''
+  color:
+    description: 'Embed color (decimal format: red=15158332, yellow=16776960, green=5763719, blue=3447003)'
+    required: false
+    default: '3447003'
+  fields:
+    description: 'JSON array of embed fields: [{"name":"Field Name","value":"Field Value","inline":true}]'
+    required: false
+    default: '[]'
+  priority:
+    description: 'Notification priority (low, medium, high, critical)'
+    required: false
+    default: 'medium'
+  footer:
+    description: 'Footer text'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Send Discord notification
+      shell: bash
+      run: |
+        # Discord notification script with retry logic and error handling
+        WEBHOOK_URL="${{ inputs.webhook-url }}"
+        TITLE="${{ inputs.title }}"
+        DESCRIPTION="${{ inputs.description }}"
+        COLOR="${{ inputs.color }}"
+        FIELDS='${{ inputs.fields }}'
+        PRIORITY="${{ inputs.priority }}"
+        FOOTER="${{ inputs.footer }}"
+
+        # Validate webhook URL
+        if [ -z "$WEBHOOK_URL" ]; then
+          echo "❌ Error: Discord webhook URL is required"
+          exit 1
+        fi
+
+        # Build the embed JSON payload
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        EMBED_JSON=$(jq -n \
+          --arg title "$TITLE" \
+          --argjson color "$COLOR" \
+          --arg timestamp "$TIMESTAMP" \
+          '{title: $title, color: $color, timestamp: $timestamp}')
+
+        # Add description if provided
+        if [ -n "$DESCRIPTION" ]; then
+          EMBED_JSON=$(echo "$EMBED_JSON" | jq --arg desc "$DESCRIPTION" '. + {description: $desc}')
+        fi
+
+        # Add fields if provided
+        if [ "$FIELDS" != "[]" ] && [ -n "$FIELDS" ]; then
+          if echo "$FIELDS" | jq empty 2>/dev/null; then
+            EMBED_JSON=$(echo "$EMBED_JSON" | jq --argjson fields "$FIELDS" '. + {fields: $fields}')
+          else
+            echo "❌ Invalid JSON in fields input"
+            exit 1
+          fi
+        fi
+
+        # Add footer if provided
+        if [ -n "$FOOTER" ]; then
+          EMBED_JSON=$(echo "$EMBED_JSON" | jq --arg footer "$FOOTER" '. + {footer: {text: $footer}}')
+        fi
+
+        # Add priority indicator to footer
+        case "$PRIORITY" in
+          low)      PRIORITY_EMOJI="🔵" ;;
+          medium)   PRIORITY_EMOJI="🟡" ;;
+          high)     PRIORITY_EMOJI="🟠" ;;
+          critical) PRIORITY_EMOJI="🔴" ;;
+          *)        PRIORITY_EMOJI="⚪" ;;
+        esac
+
+        PRIORITY_TEXT="$PRIORITY_EMOJI Priority: $PRIORITY"
+        if [ -n "$FOOTER" ]; then
+          EMBED_JSON=$(echo "$EMBED_JSON" | jq --arg p "$PRIORITY_TEXT" '.footer.text = .footer.text + " | " + $p')
+        else
+          EMBED_JSON=$(echo "$EMBED_JSON" | jq --arg p "$PRIORITY_TEXT" '. + {footer: {text: $p}}')
+        fi
+
+        PAYLOAD=$(jq -n --argjson embed "$EMBED_JSON" '{embeds: [$embed]}')
+
+        echo "📤 Sending Discord notification: $TITLE (priority: $PRIORITY)"
+
+        # Retry logic with exponential backoff
+        MAX_RETRIES=2
+        RETRY_COUNT=0
+        SUCCESS=false
+
+        while [ $RETRY_COUNT -le $MAX_RETRIES ]; do
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$WEBHOOK_URL")
+
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n1)
+          RESPONSE_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Notification sent successfully (HTTP $HTTP_CODE)"
+            SUCCESS=true
+            break
+          else
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -le $MAX_RETRIES ]; then
+              BACKOFF_DELAY=$((2 ** RETRY_COUNT))
+              echo "⚠️ Failed with HTTP $HTTP_CODE (attempt $RETRY_COUNT/$((MAX_RETRIES + 1))), retrying in ${BACKOFF_DELAY}s..."
+              sleep $BACKOFF_DELAY
+            fi
+          fi
+        done
+
+        if [ "$SUCCESS" = false ]; then
+          echo "❌ Failed to send notification after $((MAX_RETRIES + 1)) attempts (last HTTP: $HTTP_CODE)"
+          echo "Response: $RESPONSE_BODY"
+          exit 1
+        fi

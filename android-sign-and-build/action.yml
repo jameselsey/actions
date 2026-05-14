@@ -1,0 +1,129 @@
+name: 'Android Sign and Build'
+description: 'Decode a base64-encoded keystore, set signing environment variables, build a signed release AAB, verify it, then clean up the keystore'
+
+inputs:
+  keystore-base64:
+    description: 'Base64-encoded keystore file content (store as a repository secret)'
+    required: true
+  keystore-password:
+    description: 'Password for the keystore (store as a repository secret)'
+    required: true
+  key-alias:
+    description: 'Key alias within the keystore (store as a repository secret)'
+    required: true
+  key-password:
+    description: 'Password for the key (store as a repository secret)'
+    required: true
+  version-name:
+    description: 'Version name string, e.g. 1.2.0'
+    required: true
+  version-code:
+    description: 'Integer version code'
+    required: true
+  java-version:
+    description: 'JDK version to use for the build'
+    required: false
+    default: '17'
+
+outputs:
+  aab-path:
+    description: 'Path to the built signed AAB file'
+    value: ${{ steps.verify-aab.outputs.aab-path }}
+  aab-size-mb:
+    description: 'Size of the AAB file in MB (2 decimal places)'
+    value: ${{ steps.verify-aab.outputs.aab-size-mb }}
+  mapping-path:
+    description: 'Path to the ProGuard mapping directory'
+    value: ${{ steps.verify-aab.outputs.mapping-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+
+    - name: Cache Gradle packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Make gradlew executable
+      shell: bash
+      run: chmod +x ./gradlew
+
+    - name: Decode keystore
+      shell: bash
+      run: |
+        echo "🔑 Decoding keystore to /tmp/release.keystore..."
+        echo "${{ inputs.keystore-base64 }}" | base64 --decode > /tmp/release.keystore
+        if [ ! -s /tmp/release.keystore ]; then
+          echo "❌ Keystore decode failed or produced an empty file"
+          exit 1
+        fi
+        echo "✅ Keystore decoded successfully"
+
+    - name: Build signed release AAB
+      shell: bash
+      env:
+        KEYSTORE_FILE: /tmp/release.keystore
+        KEYSTORE_PASSWORD: ${{ inputs.keystore-password }}
+        KEY_ALIAS: ${{ inputs.key-alias }}
+        KEY_PASSWORD: ${{ inputs.key-password }}
+        VERSION_NAME: ${{ inputs.version-name }}
+        VERSION_CODE: ${{ inputs.version-code }}
+      run: |
+        echo "🏗️ Building signed release AAB (version $VERSION_NAME / $VERSION_CODE)..."
+        ./gradlew bundleRelease
+        echo "✅ bundleRelease completed"
+
+    - name: Verify AAB
+      id: verify-aab
+      shell: bash
+      run: |
+        AAB_PATH="app/build/outputs/bundle/release/app-release.aab"
+        MAPPING_PATH="app/build/outputs/mapping/release"
+
+        echo "🔍 Verifying AAB at $AAB_PATH..."
+
+        if [ ! -f "$AAB_PATH" ]; then
+          echo "❌ AAB not found at expected path: $AAB_PATH"
+          exit 1
+        fi
+
+        # Check file size
+        AAB_BYTES=$(wc -c < "$AAB_PATH")
+        MIN_BYTES=1024          # 1 KB minimum
+        MAX_BYTES=157286400     # 150 MB maximum
+
+        if [ "$AAB_BYTES" -lt "$MIN_BYTES" ]; then
+          echo "❌ AAB is suspiciously small (${AAB_BYTES} bytes) — build may have failed silently"
+          exit 1
+        fi
+
+        if [ "$AAB_BYTES" -gt "$MAX_BYTES" ]; then
+          echo "❌ AAB exceeds 150 MB (${AAB_BYTES} bytes) — something looks wrong"
+          exit 1
+        fi
+
+        AAB_SIZE_MB=$(echo "scale=2; $AAB_BYTES / 1048576" | bc)
+        echo "✅ AAB verified: $AAB_PATH (${AAB_SIZE_MB} MB)"
+
+        echo "aab-path=$AAB_PATH" >> $GITHUB_OUTPUT
+        echo "aab-size-mb=$AAB_SIZE_MB" >> $GITHUB_OUTPUT
+        echo "mapping-path=$MAPPING_PATH" >> $GITHUB_OUTPUT
+
+    - name: Clean up keystore
+      if: always()
+      shell: bash
+      run: |
+        echo "🧹 Removing keystore from runner..."
+        rm -f /tmp/release.keystore
+        echo "✅ Keystore removed"

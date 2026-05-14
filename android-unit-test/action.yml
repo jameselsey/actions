@@ -1,0 +1,87 @@
+name: 'Android Unit Test'
+description: 'Run Android unit tests with Gradle and upload the HTML report as a GitHub Actions artifact'
+
+inputs:
+  java-version:
+    description: 'JDK version to use for the build'
+    required: false
+    default: '17'
+  artifact-retention-days:
+    description: 'Number of days to retain the uploaded test report artifact'
+    required: false
+    default: '30'
+
+outputs:
+  result:
+    description: 'Test outcome: passed or failed'
+    value: ${{ steps.set-result.outputs.result }}
+  report-artifact-name:
+    description: 'Name of the uploaded test report artifact'
+    value: ${{ steps.set-artifact-name.outputs.artifact-name }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+
+    - name: Cache Gradle packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Make gradlew executable
+      shell: bash
+      run: chmod +x ./gradlew
+
+    - name: Generate artifact name
+      id: set-artifact-name
+      shell: bash
+      run: |
+        ARTIFACT_NAME="unit-test-report-$(date +%Y%m%d-%H%M%S)"
+        echo "artifact-name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+        echo "📦 Artifact will be uploaded as: $ARTIFACT_NAME"
+
+    - name: Run unit tests
+      id: run-tests
+      shell: bash
+      continue-on-error: true
+      run: |
+        echo "🧪 Running unit tests..."
+        ./gradlew test
+
+    - name: Set result output
+      id: set-result
+      shell: bash
+      run: |
+        if [ "${{ steps.run-tests.outcome }}" = "success" ]; then
+          echo "result=passed" >> $GITHUB_OUTPUT
+          echo "✅ Unit tests passed"
+        else
+          echo "result=failed" >> $GITHUB_OUTPUT
+          echo "❌ Unit tests failed"
+        fi
+
+    - name: Upload test report
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.set-artifact-name.outputs.artifact-name }}
+        path: app/build/reports/tests/
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn
+
+    - name: Fail if tests failed
+      shell: bash
+      run: |
+        if [ "${{ steps.run-tests.outcome }}" != "success" ]; then
+          echo "❌ Exiting with failure — unit tests did not pass. See the uploaded report for details."
+          exit 1
+        fi

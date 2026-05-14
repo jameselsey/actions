@@ -1,0 +1,234 @@
+name: 'Android Build Tools Check'
+description: 'Checks current Gradle, AGP, and Kotlin versions against latest releases and outputs notification-ready data'
+
+inputs:
+  root-build-gradle-path:
+    description: 'Path to the root build.gradle.kts file'
+    required: false
+    default: 'build.gradle.kts'
+  gradle-wrapper-path:
+    description: 'Path to gradle-wrapper.properties'
+    required: false
+    default: 'gradle/wrapper/gradle-wrapper.properties'
+  age-warning-months:
+    description: 'Number of months before a version is considered old even if not outdated'
+    required: false
+    default: '6'
+
+outputs:
+  needs_notification:
+    description: 'true if any tool is outdated or old'
+    value: ${{ steps.check.outputs.needs_notification }}
+  color:
+    description: 'Discord embed color for the status'
+    value: ${{ steps.check.outputs.color }}
+  priority:
+    description: 'Notification priority (low, medium)'
+    value: ${{ steps.check.outputs.priority }}
+  fields:
+    description: 'JSON array of Discord embed fields'
+    value: ${{ steps.check.outputs.fields }}
+  gradle_current:
+    description: 'Current Gradle version'
+    value: ${{ steps.check.outputs.gradle_current }}
+  gradle_latest:
+    description: 'Latest Gradle version'
+    value: ${{ steps.check.outputs.gradle_latest }}
+  gradle_status:
+    description: 'current or outdated'
+    value: ${{ steps.check.outputs.gradle_status }}
+  agp_current:
+    description: 'Current Android Gradle Plugin version'
+    value: ${{ steps.check.outputs.agp_current }}
+  agp_latest:
+    description: 'Latest Android Gradle Plugin version'
+    value: ${{ steps.check.outputs.agp_latest }}
+  agp_status:
+    description: 'current or outdated'
+    value: ${{ steps.check.outputs.agp_status }}
+  kotlin_current:
+    description: 'Current Kotlin version'
+    value: ${{ steps.check.outputs.kotlin_current }}
+  kotlin_latest:
+    description: 'Latest Kotlin version'
+    value: ${{ steps.check.outputs.kotlin_latest }}
+  kotlin_status:
+    description: 'current or outdated'
+    value: ${{ steps.check.outputs.kotlin_status }}
+  outdated_count:
+    description: 'Number of outdated tools (0-3)'
+    value: ${{ steps.check.outputs.outdated_count }}
+  health_score:
+    description: 'Health score 0-100 (100 = all current, -20 per outdated tool)'
+    value: ${{ steps.check.outputs.health_score }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check build tool versions
+      id: check
+      shell: bash
+      run: |
+        BUILD_FILE="${{ inputs.root-build-gradle-path }}"
+        WRAPPER_FILE="${{ inputs.gradle-wrapper-path }}"
+        AGE_WARNING_MONTHS="${{ inputs.age-warning-months }}"
+        AGE_WARNING_DAYS=$((AGE_WARNING_MONTHS * 30))
+
+        # --- Extract current versions ---
+        if [ ! -f "$WRAPPER_FILE" ]; then
+          echo "❌ Gradle wrapper not found: $WRAPPER_FILE"
+          exit 1
+        fi
+        if [ ! -f "$BUILD_FILE" ]; then
+          echo "❌ Build file not found: $BUILD_FILE"
+          exit 1
+        fi
+
+        GRADLE_VERSION=$(grep "distributionUrl" "$WRAPPER_FILE" | grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/gradle-//')
+        AGP_VERSION=$(grep 'com.android.application' "$BUILD_FILE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        KOTLIN_VERSION=$(grep 'org.jetbrains.kotlin.android' "$BUILD_FILE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+        if [ -z "$GRADLE_VERSION" ] || [ -z "$AGP_VERSION" ] || [ -z "$KOTLIN_VERSION" ]; then
+          echo "❌ Failed to extract one or more versions from $BUILD_FILE"
+          echo "  Gradle: $GRADLE_VERSION  AGP: $AGP_VERSION  Kotlin: $KOTLIN_VERSION"
+          exit 1
+        fi
+
+        echo "📦 Current: Gradle=$GRADLE_VERSION  AGP=$AGP_VERSION  Kotlin=$KOTLIN_VERSION"
+
+        # --- Fetch latest versions ---
+        GRADLE_RESPONSE=$(curl -s "https://services.gradle.org/versions/current")
+        LATEST_GRADLE=$(echo "$GRADLE_RESPONSE" | jq -r '.version')
+        GRADLE_RELEASE_DATE=$(echo "$GRADLE_RESPONSE" | jq -r '.buildTime' | cut -d'T' -f1)
+
+        AGP_RESPONSE=$(curl -s "https://search.maven.org/solrsearch/select?q=g:com.android.tools.build+AND+a:gradle&rows=1&wt=json")
+        LATEST_AGP=$(echo "$AGP_RESPONSE" | jq -r '.response.docs[0].latestVersion')
+        AGP_TIMESTAMP=$(echo "$AGP_RESPONSE" | jq -r '.response.docs[0].timestamp')
+        AGP_RELEASE_DATE=$(date -d "@$((AGP_TIMESTAMP / 1000))" +%Y-%m-%d 2>/dev/null || date -r $((AGP_TIMESTAMP / 1000)) +%Y-%m-%d)
+
+        KOTLIN_RESPONSE=$(curl -s "https://search.maven.org/solrsearch/select?q=g:org.jetbrains.kotlin+AND+a:kotlin-gradle-plugin&rows=1&wt=json")
+        LATEST_KOTLIN=$(echo "$KOTLIN_RESPONSE" | jq -r '.response.docs[0].latestVersion')
+        KOTLIN_TIMESTAMP=$(echo "$KOTLIN_RESPONSE" | jq -r '.response.docs[0].timestamp')
+        KOTLIN_RELEASE_DATE=$(date -d "@$((KOTLIN_TIMESTAMP / 1000))" +%Y-%m-%d 2>/dev/null || date -r $((KOTLIN_TIMESTAMP / 1000)) +%Y-%m-%d)
+
+        echo "🌐 Latest:  Gradle=$LATEST_GRADLE  AGP=$LATEST_AGP  Kotlin=$LATEST_KOTLIN"
+
+        # --- Compare versions ---
+        version_compare() {
+          local current=$1 latest=$2
+          if [ "$current" = "$latest" ]; then
+            echo "current"
+          elif [ "$(printf '%s\n' "$current" "$latest" | sort -V | head -n1)" = "$current" ]; then
+            echo "outdated"
+          else
+            echo "current"
+          fi
+        }
+
+        calculate_age() {
+          local release_date=$1
+          local release_ts=$(date -d "$release_date" +%s 2>/dev/null || date -j -f "%Y-%m-%d" "$release_date" +%s)
+          echo $(( ($(date +%s) - release_ts) / 86400 ))
+        }
+
+        GRADLE_STATUS=$(version_compare "$GRADLE_VERSION" "$LATEST_GRADLE")
+        AGP_STATUS=$(version_compare "$AGP_VERSION" "$LATEST_AGP")
+        AGP_AGE=$(calculate_age "$AGP_RELEASE_DATE")
+        AGP_OLD=$([ $AGP_AGE -gt $AGE_WARNING_DAYS ] && echo "true" || echo "false")
+        KOTLIN_STATUS=$(version_compare "$KOTLIN_VERSION" "$LATEST_KOTLIN")
+        KOTLIN_AGE=$(calculate_age "$KOTLIN_RELEASE_DATE")
+        KOTLIN_OLD=$([ $KOTLIN_AGE -gt $AGE_WARNING_DAYS ] && echo "true" || echo "false")
+
+        NEEDS_NOTIFICATION="false"
+        OUTDATED_COUNT=0
+        [ "$GRADLE_STATUS" = "outdated" ] && { NEEDS_NOTIFICATION="true"; OUTDATED_COUNT=$((OUTDATED_COUNT + 1)); }
+        [ "$AGP_STATUS" = "outdated" ] && { NEEDS_NOTIFICATION="true"; OUTDATED_COUNT=$((OUTDATED_COUNT + 1)); }
+        [ "$KOTLIN_STATUS" = "outdated" ] && { NEEDS_NOTIFICATION="true"; OUTDATED_COUNT=$((OUTDATED_COUNT + 1)); }
+        [ "$AGP_OLD" = "true" ] && NEEDS_NOTIFICATION="true"
+        [ "$KOTLIN_OLD" = "true" ] && NEEDS_NOTIFICATION="true"
+
+        HEALTH_SCORE=$((100 - OUTDATED_COUNT * 20))
+
+        echo "📊 Gradle=$GRADLE_STATUS  AGP=$AGP_STATUS (age: ${AGP_AGE}d)  Kotlin=$KOTLIN_STATUS (age: ${KOTLIN_AGE}d)"
+
+        # --- Build Discord fields ---
+        FIELDS=$(jq -n '[]')
+
+        # Gradle field
+        if [ "$GRADLE_STATUS" = "outdated" ]; then
+          GRADLE_TEXT="**Current:** $GRADLE_VERSION\n**Latest:** $LATEST_GRADLE\n**Status:** Update available"
+          GRADLE_ICON="🔴"
+        else
+          GRADLE_TEXT="**Current:** $GRADLE_VERSION\n**Status:** Up to date"
+          GRADLE_ICON="✅"
+        fi
+        FIELDS=$(echo "$FIELDS" | jq --arg n "$GRADLE_ICON Gradle" --arg v "$GRADLE_TEXT" '. + [{"name":$n,"value":$v,"inline":true}]')
+
+        # AGP field
+        if [ "$AGP_STATUS" = "outdated" ]; then
+          AGP_TEXT="**Current:** $AGP_VERSION\n**Latest:** $LATEST_AGP\n**Status:** Update available"
+          AGP_ICON="🔴"
+        elif [ "$AGP_OLD" = "true" ]; then
+          AGP_TEXT="**Current:** $AGP_VERSION\n**Latest:** $LATEST_AGP\n**Age:** ${AGP_AGE}d (>${AGE_WARNING_MONTHS} months)"
+          AGP_ICON="⚠️"
+        else
+          AGP_TEXT="**Current:** $AGP_VERSION\n**Status:** Up to date"
+          AGP_ICON="✅"
+        fi
+        FIELDS=$(echo "$FIELDS" | jq --arg n "$AGP_ICON Android Gradle Plugin" --arg v "$AGP_TEXT" '. + [{"name":$n,"value":$v,"inline":true}]')
+
+        # Kotlin field
+        if [ "$KOTLIN_STATUS" = "outdated" ]; then
+          KOTLIN_TEXT="**Current:** $KOTLIN_VERSION\n**Latest:** $LATEST_KOTLIN\n**Status:** Update available"
+          KOTLIN_ICON="🔴"
+        elif [ "$KOTLIN_OLD" = "true" ]; then
+          KOTLIN_TEXT="**Current:** $KOTLIN_VERSION\n**Latest:** $LATEST_KOTLIN\n**Age:** ${KOTLIN_AGE}d (>${AGE_WARNING_MONTHS} months)"
+          KOTLIN_ICON="⚠️"
+        else
+          KOTLIN_TEXT="**Current:** $KOTLIN_VERSION\n**Status:** Up to date"
+          KOTLIN_ICON="✅"
+        fi
+        FIELDS=$(echo "$FIELDS" | jq --arg n "$KOTLIN_ICON Kotlin" --arg v "$KOTLIN_TEXT" '. + [{"name":$n,"value":$v,"inline":true}]')
+
+        # Update commands field
+        UPDATE_CMDS=""
+        [ "$GRADLE_STATUS" = "outdated" ] && UPDATE_CMDS="${UPDATE_CMDS}**Gradle:**\n\`\`\`bash\n./gradlew wrapper --gradle-version $LATEST_GRADLE\n\`\`\`\n\n"
+        if [ "$AGP_STATUS" = "outdated" ] || [ "$KOTLIN_STATUS" = "outdated" ]; then
+          UPDATE_CMDS="${UPDATE_CMDS}**build.gradle.kts:**\n\`\`\`kotlin\nplugins {\n"
+          [ "$AGP_STATUS" = "outdated" ] && UPDATE_CMDS="${UPDATE_CMDS}    id(\"com.android.application\") version \"$LATEST_AGP\" apply false\n"
+          [ "$KOTLIN_STATUS" = "outdated" ] && UPDATE_CMDS="${UPDATE_CMDS}    id(\"org.jetbrains.kotlin.android\") version \"$LATEST_KOTLIN\" apply false\n"
+          UPDATE_CMDS="${UPDATE_CMDS}}\n\`\`\`"
+        fi
+        if [ -n "$UPDATE_CMDS" ]; then
+          FIELDS=$(echo "$FIELDS" | jq --arg n "📝 Update Commands" --arg v "$UPDATE_CMDS" '. + [{"name":$n,"value":$v,"inline":false}]')
+        fi
+
+        # Color and priority
+        if [ "$GRADLE_STATUS" = "outdated" ] || [ "$AGP_STATUS" = "outdated" ] || [ "$KOTLIN_STATUS" = "outdated" ]; then
+          COLOR="16776960"; PRIORITY="medium"
+        else
+          COLOR="5763719"; PRIORITY="low"
+        fi
+
+        # --- Set outputs ---
+        echo "needs_notification=$NEEDS_NOTIFICATION" >> $GITHUB_OUTPUT
+        echo "color=$COLOR" >> $GITHUB_OUTPUT
+        echo "priority=$PRIORITY" >> $GITHUB_OUTPUT
+        echo "gradle_current=$GRADLE_VERSION" >> $GITHUB_OUTPUT
+        echo "gradle_latest=$LATEST_GRADLE" >> $GITHUB_OUTPUT
+        echo "gradle_status=$GRADLE_STATUS" >> $GITHUB_OUTPUT
+        echo "agp_current=$AGP_VERSION" >> $GITHUB_OUTPUT
+        echo "agp_latest=$LATEST_AGP" >> $GITHUB_OUTPUT
+        echo "agp_status=$AGP_STATUS" >> $GITHUB_OUTPUT
+        echo "kotlin_current=$KOTLIN_VERSION" >> $GITHUB_OUTPUT
+        echo "kotlin_latest=$LATEST_KOTLIN" >> $GITHUB_OUTPUT
+        echo "kotlin_status=$KOTLIN_STATUS" >> $GITHUB_OUTPUT
+        echo "outdated_count=$OUTDATED_COUNT" >> $GITHUB_OUTPUT
+        echo "health_score=$HEALTH_SCORE" >> $GITHUB_OUTPUT
+        {
+          echo 'fields<<EOF'
+          echo "$FIELDS"
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT
+
+        echo "✅ Build tools check complete (needs_notification=$NEEDS_NOTIFICATION)"
