@@ -148,7 +148,7 @@ runs:
         START_DATE=$(date -d "7 days ago" +"%b %d" 2>/dev/null || date -v-7d +"%b %d")
 
         # Build description — repo name and report period only, no overall score
-        DESCRIPTION=$(jq -n \
+        DESCRIPTION=$(jq -rn \
           --arg repo "${{ inputs.repository }}" \
           --arg period "$START_DATE – $END_DATE" \
           '"📅 " + $period + "  •  " + $repo')
