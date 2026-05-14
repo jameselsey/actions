@@ -79,7 +79,7 @@ runs:
             echo "📂 Scanning $gradle_file..."
             while IFS= read -r line; do
               if echo "$line" | grep -qE '^\s*(implementation|api|compileOnly|runtimeOnly)\s*\('; then
-                dep=$(echo "$line" | grep -oE '"[^":]+":[^:]+:[^"]+"' | tr -d '"')
+                dep=$(echo "$line" | grep -oE '"[^"]+:[^"]+:[^"]+"' | tr -d '"' || true)
                 if [ -n "$dep" ]; then
                   group=$(echo "$dep" | cut -d: -f1)
                   artifact=$(echo "$dep" | cut -d: -f2)
