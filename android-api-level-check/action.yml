@@ -83,7 +83,8 @@ runs:
           STATUS="critical"
           MESSAGE="❌ CRITICAL: targetSdkVersion update required"
           COLOR="16744272"
-        elif [ "$DAYS_REMAINING" -lt "$WARNING_DAYS" ]; then
+        elif [ "$DAYS_REMAINING" -gt 0 ] && [ "$DAYS_REMAINING" -lt "$WARNING_DAYS" ]; then
+          # Only warn if the deadline is in the future and approaching
           STATUS="warning"
           MESSAGE="⚠️ WARNING: Upcoming API level requirement"
           COLOR="16776960"

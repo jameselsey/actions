@@ -147,51 +147,91 @@ runs:
 
         END_DATE=$(date +"%b %d, %Y")
         START_DATE=$(date -d "7 days ago" +"%b %d" 2>/dev/null || date -v-7d +"%b %d")
-        DESCRIPTION="**Report Period:** $START_DATE – $END_DATE\n**Overall Health Score:** $OVERALL/100\n**Status:** $STATUS"
+
+        # Build description — repo name and report period only, no overall score
+        DESCRIPTION=$(jq -n \
+          --arg repo "${{ inputs.repository }}" \
+          --arg period "$START_DATE – $END_DATE" \
+          '"📅 " + $period + "  •  " + $repo')
 
         # Build fields
         FIELDS=$(jq -n '[]')
 
         # Dependencies
         DEP_STATUS="${{ steps.deps.outputs.has_updates == 'true' && format('⚠️ {0} update(s) available', steps.deps.outputs.outdated) || '✅ All dependencies up to date' }}"
-        DEP_VALUE="$DEP_STATUS\n• Total: ${{ steps.deps.outputs.total }}"
-        if [ "${{ steps.deps.outputs.outdated }}" -gt 0 ]; then
-          DEP_VALUE="$DEP_VALUE\n• Updates: ${{ steps.deps.outputs.major }} major, ${{ steps.deps.outputs.minor }} minor, ${{ steps.deps.outputs.patch }} patch"
+        DEP_TOTAL="${{ steps.deps.outputs.total }}"
+        DEP_OUTDATED="${{ steps.deps.outputs.outdated }}"
+        DEP_MAJOR="${{ steps.deps.outputs.major }}"
+        DEP_MINOR="${{ steps.deps.outputs.minor }}"
+        DEP_PATCH="${{ steps.deps.outputs.patch }}"
+        if [ "$DEP_OUTDATED" -gt 0 ]; then
+          DEP_VALUE=$(jq -n --arg s "$DEP_STATUS" --arg t "$DEP_TOTAL" --arg maj "$DEP_MAJOR" --arg min "$DEP_MINOR" --arg pat "$DEP_PATCH" \
+            '$s + "\n• Total: " + $t + "\n• Updates: " + $maj + " major, " + $min + " minor, " + $pat + " patch"')
+        else
+          DEP_VALUE=$(jq -n --arg s "$DEP_STATUS" --arg t "$DEP_TOTAL" '$s + "\n• Total: " + $t')
         fi
-        FIELDS=$(echo "$FIELDS" | jq --arg n "📦 Dependencies" --arg v "$DEP_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+        FIELDS=$(echo "$FIELDS" | jq --argjson v "$DEP_VALUE" '. + [{"name":"📦 Dependencies","value":$v,"inline":true}]')
 
         # API Compliance
-        API_VALUE="${{ steps.api.outputs.message }}\n• Current targetSdk: ${{ steps.api.outputs.target_sdk }}\n• Required: ${{ steps.api.outputs.required_sdk }}\n• Days until deadline: ${{ steps.api.outputs.days_remaining }}"
-        FIELDS=$(echo "$FIELDS" | jq --arg n "📱 API Compliance" --arg v "$API_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+        API_VALUE=$(jq -n \
+          --arg msg "${{ steps.api.outputs.message }}" \
+          --arg sdk "${{ steps.api.outputs.target_sdk }}" \
+          --arg req "${{ steps.api.outputs.required_sdk }}" \
+          --arg days "${{ steps.api.outputs.days_remaining }}" \
+          '$msg + "\n• Current targetSdk: " + $sdk + "\n• Required: " + $req + "\n• Days until deadline: " + $days')
+        FIELDS=$(echo "$FIELDS" | jq --argjson v "$API_VALUE" '. + [{"name":"📱 API Compliance","value":$v,"inline":true}]')
 
         # Build Health
-        BUILD_VALUE="${{ steps.history.outputs.status }}\n• Last ${{ inputs.build-history-days }} days: ${{ steps.history.outputs.successful }}/${{ steps.history.outputs.total }} successful"
-        FIELDS=$(echo "$FIELDS" | jq --arg n "🏗️ Build Health" --arg v "$BUILD_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+        BUILD_STATUS="${{ steps.history.outputs.status }}"
+        BUILD_DAYS="${{ inputs.build-history-days }}"
+        BUILD_OK="${{ steps.history.outputs.successful }}"
+        BUILD_TOTAL="${{ steps.history.outputs.total }}"
+        BUILD_VALUE=$(jq -n --arg s "$BUILD_STATUS" --arg d "$BUILD_DAYS" --arg ok "$BUILD_OK" --arg t "$BUILD_TOTAL" \
+          '$s + "\n• Last " + $d + " days: " + $ok + "/" + $t + " successful"')
+        FIELDS=$(echo "$FIELDS" | jq --argjson v "$BUILD_VALUE" '. + [{"name":"🏗️ Build Health","value":$v,"inline":true}]')
 
         # Build Tools
         TOOLS_STATUS="${{ steps.tools.outputs.outdated_count > 0 && format('⚠️ {0} tool(s) outdated', steps.tools.outputs.outdated_count) || '✅ All build tools current' }}"
-        TOOLS_VALUE="$TOOLS_STATUS\n• Gradle: ${{ steps.tools.outputs.gradle_current }}"
-        [ "${{ steps.tools.outputs.gradle_status }}" = "outdated" ] && TOOLS_VALUE="$TOOLS_VALUE → ${{ steps.tools.outputs.gradle_latest }}"
-        TOOLS_VALUE="$TOOLS_VALUE\n• AGP: ${{ steps.tools.outputs.agp_current }}"
-        [ "${{ steps.tools.outputs.agp_status }}" = "outdated" ] && TOOLS_VALUE="$TOOLS_VALUE → ${{ steps.tools.outputs.agp_latest }}"
-        TOOLS_VALUE="$TOOLS_VALUE\n• Kotlin: ${{ steps.tools.outputs.kotlin_current }}"
-        [ "${{ steps.tools.outputs.kotlin_status }}" = "outdated" ] && TOOLS_VALUE="$TOOLS_VALUE → ${{ steps.tools.outputs.kotlin_latest }}"
-        FIELDS=$(echo "$FIELDS" | jq --arg n "🔧 Build Tools" --arg v "$TOOLS_VALUE" '. + [{"name":$n,"value":$v,"inline":true}]')
+        GRADLE_LINE="${{ steps.tools.outputs.gradle_current }}"
+        [ "${{ steps.tools.outputs.gradle_status }}" = "outdated" ] && GRADLE_LINE="$GRADLE_LINE → ${{ steps.tools.outputs.gradle_latest }}"
+        AGP_LINE="${{ steps.tools.outputs.agp_current }}"
+        [ "${{ steps.tools.outputs.agp_status }}" = "outdated" ] && AGP_LINE="$AGP_LINE → ${{ steps.tools.outputs.agp_latest }}"
+        KOTLIN_LINE="${{ steps.tools.outputs.kotlin_current }}"
+        [ "${{ steps.tools.outputs.kotlin_status }}" = "outdated" ] && KOTLIN_LINE="$KOTLIN_LINE → ${{ steps.tools.outputs.kotlin_latest }}"
+        TOOLS_VALUE=$(jq -n --arg s "$TOOLS_STATUS" --arg g "$GRADLE_LINE" --arg a "$AGP_LINE" --arg k "$KOTLIN_LINE" \
+          '$s + "\n• Gradle: " + $g + "\n• AGP: " + $a + "\n• Kotlin: " + $k')
+        FIELDS=$(echo "$FIELDS" | jq --argjson v "$TOOLS_VALUE" '. + [{"name":"🔧 Build Tools","value":$v,"inline":true}]')
 
-        # Action items
-        ACTION_ITEMS=""
+        # Action items — build as a proper newline-separated string via jq
+        ACTION_LINES="[]"
         N=1
-        [ "${{ steps.api.outputs.status }}" = "critical" ] && { ACTION_ITEMS="${ACTION_ITEMS}${N}. **URGENT:** Update targetSdk to ${{ steps.api.outputs.required_sdk }}\n"; N=$((N+1)); }
-        [ "${{ steps.deps.outputs.major }}" -gt 0 ] 2>/dev/null && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Review ${{ steps.deps.outputs.major }} major dependency update(s)\n"; N=$((N+1)); }
-        [ "${{ steps.history.outputs.failed }}" -gt 0 ] 2>/dev/null && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Investigate ${{ steps.history.outputs.failed }} recent build failure(s)\n"; N=$((N+1)); }
-        [ "${{ steps.tools.outputs.outdated_count }}" -gt 0 ] 2>/dev/null && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Update ${{ steps.tools.outputs.outdated_count }} build tool(s)\n"; N=$((N+1)); }
+        [ "${{ steps.api.outputs.status }}" = "critical" ] && {
+          ACTION_LINES=$(echo "$ACTION_LINES" | jq --arg l "${N}. **URGENT:** Update targetSdk to ${{ steps.api.outputs.required_sdk }}" '. + [$l]')
+          N=$((N+1))
+        }
+        [ "${{ steps.deps.outputs.major }}" -gt 0 ] 2>/dev/null && {
+          ACTION_LINES=$(echo "$ACTION_LINES" | jq --arg l "${N}. Review ${{ steps.deps.outputs.major }} major dependency update(s)" '. + [$l]')
+          N=$((N+1))
+        }
+        [ "${{ steps.history.outputs.failed }}" -gt 0 ] 2>/dev/null && {
+          ACTION_LINES=$(echo "$ACTION_LINES" | jq --arg l "${N}. Investigate ${{ steps.history.outputs.failed }} recent build failure(s)" '. + [$l]')
+          N=$((N+1))
+        }
+        [ "${{ steps.tools.outputs.outdated_count }}" -gt 0 ] 2>/dev/null && {
+          ACTION_LINES=$(echo "$ACTION_LINES" | jq --arg l "${N}. Update ${{ steps.tools.outputs.outdated_count }} build tool(s)" '. + [$l]')
+          N=$((N+1))
+        }
         MINOR_PATCH=$(( ${{ steps.deps.outputs.minor }} + ${{ steps.deps.outputs.patch }} ))
-        [ $MINOR_PATCH -gt 0 ] && { ACTION_ITEMS="${ACTION_ITEMS}${N}. Consider updating $MINOR_PATCH minor/patch dependencies\n"; }
+        [ $MINOR_PATCH -gt 0 ] && {
+          ACTION_LINES=$(echo "$ACTION_LINES" | jq --arg l "${N}. Consider updating $MINOR_PATCH minor/patch dependencies" '. + [$l]')
+        }
 
-        if [ -n "$ACTION_ITEMS" ]; then
-          FIELDS=$(echo "$FIELDS" | jq --arg n "📋 Action Items" --arg v "$ACTION_ITEMS" '. + [{"name":$n,"value":$v,"inline":false}]')
+        ACTION_COUNT=$(echo "$ACTION_LINES" | jq 'length')
+        if [ "$ACTION_COUNT" -gt 0 ]; then
+          ACTION_VALUE=$(echo "$ACTION_LINES" | jq -r 'join("\n")')
+          FIELDS=$(echo "$FIELDS" | jq --arg v "$ACTION_VALUE" '. + [{"name":"📋 Action Items","value":$v,"inline":false}]')
         else
-          FIELDS=$(echo "$FIELDS" | jq --arg n "✅ Status" --arg v "No action items — all systems healthy!" '. + [{"name":$n,"value":$v,"inline":false}]')
+          FIELDS=$(echo "$FIELDS" | jq '. + [{"name":"✅ Status","value":"No action items — all systems healthy!","inline":false}]')
         fi
 
         echo "overall_score=$OVERALL" >> $GITHUB_OUTPUT

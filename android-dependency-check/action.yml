@@ -51,7 +51,9 @@ runs:
         get_latest_version() {
           local group="$1" artifact="$2" current="$3"
           local url="https://search.maven.org/solrsearch/select?q=g:${group}+AND+a:${artifact}&rows=1&wt=json"
-          local latest=$(curl -s "$url" | jq -r '.response.docs[0].latestVersion // empty')
+          local response latest
+          response=$(curl -s --max-time 10 "$url")
+          latest=$(echo "$response" | jq -r '.response.docs[0].latestVersion // empty' 2>/dev/null || true)
           echo "${latest:-$current}"
         }
 
