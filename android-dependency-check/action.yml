@@ -57,12 +57,15 @@ runs:
 
         classify_severity() {
           local current="$1" latest="$2"
-          local cm=$(echo "$current" | cut -d. -f1 | grep -oE '[0-9]+')
-          local lm=$(echo "$latest"  | cut -d. -f1 | grep -oE '[0-9]+')
-          local cn=$(echo "$current" | cut -d. -f2 | grep -oE '[0-9]+' || echo 0)
-          local ln=$(echo "$latest"  | cut -d. -f2 | grep -oE '[0-9]+' || echo 0)
-          local cp=$(echo "$current" | cut -d. -f3 | grep -oE '[0-9]+' || echo 0)
-          local lp=$(echo "$latest"  | cut -d. -f3 | grep -oE '[0-9]+' || echo 0)
+          local cm lm cn ln cp lp
+          cm=$(echo "$current" | cut -d. -f1 | grep -oE '[0-9]+' || echo 0)
+          lm=$(echo "$latest"  | cut -d. -f1 | grep -oE '[0-9]+' || echo 0)
+          cn=$(echo "$current" | cut -d. -f2 | grep -oE '[0-9]+' || echo 0)
+          ln=$(echo "$latest"  | cut -d. -f2 | grep -oE '[0-9]+' || echo 0)
+          cp=$(echo "$current" | cut -d. -f3 | grep -oE '[0-9]+' || echo 0)
+          lp=$(echo "$latest"  | cut -d. -f3 | grep -oE '[0-9]+' || echo 0)
+          # Default to 0 if empty
+          cm=${cm:-0}; lm=${lm:-0}; cn=${cn:-0}; ln=${ln:-0}; cp=${cp:-0}; lp=${lp:-0}
           if   [ "$lm" -gt "$cm" ]; then echo "major"
           elif [ "$ln" -gt "$cn" ]; then echo "minor"
           elif [ "$lp" -gt "$cp" ]; then echo "patch"
