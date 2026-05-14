@@ -1,0 +1,109 @@
+name: 'Android Instrumented Test'
+description: 'Run Android instrumented tests on an emulator using the Android Emulator Runner action'
+
+inputs:
+  api-level:
+    description: 'Android API level for the emulator'
+    required: false
+    default: '33'
+  target:
+    description: 'Emulator target: default or google_apis'
+    required: false
+    default: 'default'
+  arch:
+    description: 'Emulator CPU architecture: x86_64 or x86'
+    required: false
+    default: 'x86_64'
+  java-version:
+    description: 'JDK version to use'
+    required: false
+    default: '17'
+  artifact-retention-days:
+    description: 'Number of days to retain the test report artifact'
+    required: false
+    default: '30'
+
+outputs:
+  result:
+    description: 'Test outcome: passed or failed'
+    value: ${{ steps.set-result.outputs.result }}
+  report-artifact-name:
+    description: 'Name of the uploaded test report artifact'
+    value: ${{ steps.set-artifact-name.outputs.artifact-name }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+
+    - name: Cache Gradle packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Make gradlew executable
+      shell: bash
+      run: chmod +x ./gradlew
+
+    - name: Enable KVM for hardware acceleration
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
+    - name: Generate artifact name
+      id: set-artifact-name
+      shell: bash
+      run: |
+        ARTIFACT_NAME="instrumented-test-report-$(date +%Y%m%d-%H%M%S)"
+        echo "artifact-name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+        echo "📦 Artifact will be uploaded as: $ARTIFACT_NAME"
+
+    - name: Run instrumented tests
+      id: run-tests
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: ${{ inputs.api-level }}
+        target: ${{ inputs.target }}
+        arch: ${{ inputs.arch }}
+        disable-animations: true
+        script: ./gradlew connectedDebugAndroidTest
+
+    - name: Set result output
+      id: set-result
+      shell: bash
+      run: |
+        if [ "${{ steps.run-tests.outcome }}" = "success" ]; then
+          echo "result=passed" >> $GITHUB_OUTPUT
+          echo "✅ Instrumented tests passed"
+        else
+          echo "result=failed" >> $GITHUB_OUTPUT
+          echo "❌ Instrumented tests failed"
+        fi
+
+    - name: Upload test report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.set-artifact-name.outputs.artifact-name }}
+        path: app/build/reports/androidTests/connected/
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn
+
+    - name: Fail if tests failed
+      shell: bash
+      run: |
+        if [ "${{ steps.run-tests.outcome }}" != "success" ]; then
+          echo "❌ Instrumented tests failed. See the uploaded report for details."
+          exit 1
+        fi

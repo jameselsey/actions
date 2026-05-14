@@ -36,6 +36,10 @@ Decode a keystore, build a signed release AAB, and verify it.
 
 Publish a signed AAB to a Google Play track using a service account.
 
+### [`android-instrumented-test`](./android-instrumented-test)
+
+Run Android instrumented tests on an emulator (requires Linux runner with KVM). Uploads the HTML report as an artifact.
+
 ## Usage
 
 Reference actions from this repo using:
@@ -49,6 +53,7 @@ uses: jameselsey/actions/android-weekly-digest@main
 uses: jameselsey/actions/android-unit-test@main
 uses: jameselsey/actions/android-sign-and-build@main
 uses: jameselsey/actions/android-publish-to-play@main
+uses: jameselsey/actions/android-instrumented-test@main
 ```
 
 Each calling repository controls its own schedule and configuration (e.g. `monitoring-config.json`).
