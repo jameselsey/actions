@@ -1,0 +1,118 @@
+name: 'Semver Release Notes'
+description: >
+  Calculates the next semantic version from the latest git tag, generates release notes
+  from commits since that tag, and outputs an Android-compatible version code.
+  Requires a full git history (fetch-depth: 0).
+
+inputs:
+  bump:
+    description: 'Version component to increment: patch, minor, or major'
+    required: false
+    default: 'patch'
+  release-notes:
+    description: 'Manual release notes. If provided, skips auto-generation from commits.'
+    required: false
+    default: ''
+  exclude-patterns:
+    description: >
+      Newline-separated grep patterns to exclude from auto-generated notes.
+      Defaults to filtering dependabot and chore(deps) commits.
+    required: false
+    default: |
+      ^• chore(deps)
+      ^• Bump
+
+outputs:
+  version-name:
+    description: 'Next version string, e.g. 1.2.3'
+    value: ${{ steps.calc.outputs.version_name }}
+  version-code:
+    description: 'Android version code: (major * 10000) + (minor * 100) + patch'
+    value: ${{ steps.calc.outputs.version_code }}
+  previous-tag:
+    description: 'The git tag this release is based on, e.g. v1.2.2'
+    value: ${{ steps.calc.outputs.previous_tag }}
+  release-notes:
+    description: 'Release notes — either the manual input or auto-generated bullet points'
+    value: ${{ steps.calc.outputs.release_notes }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Calculate version and release notes
+      id: calc
+      shell: bash
+      run: |
+        BUMP="${{ inputs.bump }}"
+        MANUAL_NOTES="${{ inputs.release-notes }}"
+
+        # --- Find latest semver tag ---
+        LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1)
+        if [ -z "$LATEST" ]; then
+          LATEST="v0.0.0"
+          echo "ℹ️ No existing tags found, starting from $LATEST"
+        else
+          echo "📌 Latest tag: $LATEST"
+        fi
+
+        # --- Bump version ---
+        CURRENT="${LATEST#v}"
+        MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+        MINOR=$(echo "$CURRENT" | cut -d. -f2)
+        PATCH=$(echo "$CURRENT" | cut -d. -f3)
+
+        case "$BUMP" in
+          major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+          minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+          patch) PATCH=$((PATCH + 1)) ;;
+          *) echo "❌ Invalid bump type: $BUMP (must be patch, minor, or major)"; exit 1 ;;
+        esac
+
+        VERSION="${MAJOR}.${MINOR}.${PATCH}"
+        VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+
+        echo "✅ $LATEST → $VERSION (code $VERSION_CODE, bump: $BUMP)"
+
+        # --- Generate release notes ---
+        if [ -n "$MANUAL_NOTES" ]; then
+          NOTES="$MANUAL_NOTES"
+          echo "📝 Using manually provided release notes"
+        else
+          echo "📝 Auto-generating release notes from commits since $LATEST..."
+
+          if [ "$LATEST" = "v0.0.0" ]; then
+            COMMITS=$(git log --pretty=format:"• %s" --no-merges)
+          else
+            COMMITS=$(git log "${LATEST}..HEAD" --pretty=format:"• %s" --no-merges)
+          fi
+
+          if [ -z "$COMMITS" ]; then
+            NOTES="• No changes since last release"
+          else
+            # Apply exclusion patterns
+            FILTERED="$COMMITS"
+            while IFS= read -r pattern; do
+              [ -z "$pattern" ] && continue
+              FILTERED=$(echo "$FILTERED" | grep -v "$pattern" || true)
+            done <<< "${{ inputs.exclude-patterns }}"
+
+            if [ -z "$FILTERED" ]; then
+              NOTES="• Dependency updates"
+            else
+              NOTES="$FILTERED"
+            fi
+          fi
+
+          echo "📋 Generated notes:"
+          echo "$NOTES"
+        fi
+
+        # --- Set outputs ---
+        echo "version_name=$VERSION" >> $GITHUB_OUTPUT
+        echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+        echo "previous_tag=$LATEST" >> $GITHUB_OUTPUT
+        {
+          echo 'release_notes<<EOF'
+          echo "$NOTES"
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT

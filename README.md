@@ -20,7 +20,9 @@ Check current Gradle, AGP, and Kotlin versions against the latest releases. Outp
 
 Scan `build.gradle.kts` files for outdated Maven dependencies, classified by severity (major/minor/patch). Outputs counts, color, and pre-built Discord fields.
 
-### [`android-weekly-digest`](./android-weekly-digest)
+### [`android-instrumented-test`](./android-instrumented-test)
+
+Run Android instrumented tests on an emulator (requires Linux runner with KVM). Uploads the HTML report as an artifact.
 
 Orchestrates all Android health checks and produces a combined weekly digest with an overall health score. Designed to be paired with `discord-notify`.
 
@@ -36,9 +38,9 @@ Decode a keystore, build a signed release AAB, and verify it.
 
 Publish a signed AAB to a Google Play track using a service account.
 
-### [`android-instrumented-test`](./android-instrumented-test)
+### [`semver-release-notes`](./semver-release-notes)
 
-Run Android instrumented tests on an emulator (requires Linux runner with KVM). Uploads the HTML report as an artifact.
+Calculate the next semantic version from git tags, auto-generate release notes from commits since the last tag, and output an Android-compatible version code. Generic — works for any repo using `vX.Y.Z` tags.
 
 ## Usage
 
@@ -53,7 +55,7 @@ uses: jameselsey/actions/android-weekly-digest@main
 uses: jameselsey/actions/android-unit-test@main
 uses: jameselsey/actions/android-sign-and-build@main
 uses: jameselsey/actions/android-publish-to-play@main
-uses: jameselsey/actions/android-instrumented-test@main
+uses: jameselsey/actions/semver-release-notes@main
 ```
 
 Each calling repository controls its own schedule and configuration (e.g. `monitoring-config.json`).
