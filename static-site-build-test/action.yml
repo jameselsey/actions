@@ -1,0 +1,91 @@
+name: 'Static Site Build and Test'
+description: >
+  Installs dependencies, builds a static site, and runs tests.
+  Outputs the build directory path for use by downstream steps or actions.
+
+inputs:
+  node-version:
+    description: 'Node.js version to use'
+    required: false
+    default: '20'
+  working-directory:
+    description: 'Directory containing the site source (where package.json lives)'
+    required: false
+    default: '.'
+  build-command:
+    description: 'npm script to build the site'
+    required: false
+    default: 'build'
+  test-command:
+    description: 'npm script to run tests. Leave empty to skip tests.'
+    required: false
+    default: 'test'
+  build-output-dir:
+    description: 'Directory produced by the build command, relative to working-directory'
+    required: false
+    default: 'dist'
+
+outputs:
+  build-path:
+    description: 'Absolute path to the built output directory'
+    value: ${{ steps.resolve-path.outputs.build_path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "📦 Installing dependencies..."
+        npm ci
+        echo "✅ Dependencies installed"
+
+    - name: Run tests
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        TEST_CMD="${{ inputs.test-command }}"
+        if [ -z "$TEST_CMD" ]; then
+          echo "⏭️ No test command provided, skipping tests"
+          exit 0
+        fi
+        echo "🧪 Running tests: npm run $TEST_CMD"
+        npm run "$TEST_CMD"
+        echo "✅ Tests passed"
+
+    - name: Build site
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "🔨 Building site: npm run ${{ inputs.build-command }}"
+        npm run "${{ inputs.build-command }}"
+        echo "✅ Build complete"
+
+    - name: Verify build output exists
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        OUTPUT_DIR="${{ inputs.build-output-dir }}"
+        if [ ! -d "$OUTPUT_DIR" ]; then
+          echo "❌ Build output directory '$OUTPUT_DIR' not found after build"
+          exit 1
+        fi
+        FILE_COUNT=$(find "$OUTPUT_DIR" -type f | wc -l | tr -d ' ')
+        echo "✅ Build output verified: $FILE_COUNT file(s) in '$OUTPUT_DIR'"
+
+    - name: Resolve absolute build path
+      id: resolve-path
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        ABS_PATH="$(pwd)/${{ inputs.build-output-dir }}"
+        echo "build_path=$ABS_PATH" >> $GITHUB_OUTPUT
+        echo "📁 Build path: $ABS_PATH"

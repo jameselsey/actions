@@ -42,6 +42,14 @@ Publish a signed AAB to a Google Play track using a service account.
 
 Calculate the next semantic version from git tags, auto-generate release notes from commits since the last tag, and output an Android-compatible version code. Generic — works for any repo using `vX.Y.Z` tags.
 
+### [`static-site-build-test`](./static-site-build-test)
+
+Install dependencies, run tests, and build a static site using npm scripts. Outputs the absolute path to the build directory for use by downstream steps or actions.
+
+### [`aws-static-site-deploy`](./aws-static-site-deploy)
+
+Sync a pre-built static site to an S3 bucket and invalidate a CloudFront distribution cache. Applies separate cache-control headers for HTML files and static assets.
+
 ## Usage
 
 Reference actions from this repo using:
@@ -56,6 +64,8 @@ uses: jameselsey/actions/android-unit-test@main
 uses: jameselsey/actions/android-sign-and-build@main
 uses: jameselsey/actions/android-publish-to-play@main
 uses: jameselsey/actions/semver-release-notes@main
+uses: jameselsey/actions/static-site-build-test@main
+uses: jameselsey/actions/aws-static-site-deploy@main
 ```
 
 Each calling repository controls its own schedule and configuration (e.g. `monitoring-config.json`).
